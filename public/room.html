@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <title>Huss - Sala Privada</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">Huss</div>
+    <div class="top-actions">
+      <button id="admin-toggle" class="btn-outline">Painel do Dono</button>
+    </div>
+  </header>
+
+  <main>
+    <div id="video-grid" class="grid"></div>
+
+    <!-- preview local de screen share (apenas local) -->
+    <div id="screen-preview" class="screen-preview" hidden>
+      <div class="screen-title">Sua Tela (Preview)</div>
+      <video id="screen-preview-video" autoplay playsinline muted></video>
+    </div>
+  </main>
+
+  <aside id="admin-panel" class="admin-panel" hidden>
+    <h3>Painel do Dono</h3>
+    <div id="user-list" class="user-list"></div>
+  </aside>
+
+  <div class="controls-bar">
+    <div class="controls-left">
+      <button id="mute-btn" class="btn">Mutar</button>
+      <button id="camera-btn" class="btn">Desligar Câmera</button>
+      <button id="share-screen-btn" class="btn">Compartilhar Tela</button>
+
+      <label class="fake-label">Webcam Falsa:
+        <input id="fake-cam-input" type="file" accept="video/*,image/*" />
+      </label>
+
+      <button id="voice-synth-btn" class="btn">Ativar Voz Sintética</button>
+      <button id="monitor-btn" class="btn-outline">Ouvir Microfone</button>
+    </div>
+
+    <div class="controls-right">
+      <button id="disconnect-btn" class="btn-danger">Desconectar</button>
+    </div>
+  </div>
+
+  <!-- medidor e mensagens -->
+  <div id="audio-meter" class="audio-meter">
+    <div id="audio-level" class="audio-level"></div>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="client.js"></script>
+</body>
+</html>

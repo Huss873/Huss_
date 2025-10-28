@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <title>Huss - Login</title>
+  <link rel="stylesheet" href="public/style.css">
+</head>
+<body>
+  <div class="login-container">
+    <div class="login-box">
+      <h1>Huss Private Call</h1>
+      <form id="loginForm">
+        <input type="email" id="email" placeholder="Email" required>
+        <input type="password" id="password" placeholder="Senha" required>
+        <button type="submit">Entrar</button>
+      </form>
+      <p id="error-message" class="error"></p>
+    </div>
+  </div>
+
+  <script>
+    document.getElementById('loginForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const email = document.getElementById('email').value;
+      const password = document.getElementById('password').value;
+      const res = await fetch('/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password })
+      });
+      const data = await res.json();
+      if (data.success) {
+        sessionStorage.setItem('huss_user', JSON.stringify(data.user));
+        window.location.href = '/room.html';
+      } else {
+        document.getElementById('error-message').textContent = data.message;
+      }
+    });
+  </script>
+</body>
+</html>
