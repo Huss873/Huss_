@@ -51,6 +51,16 @@
   </div>
 
   <script src="/socket.io/socket.io.js"></script>
+
+  <!-- novo trecho: painel do dono aparece só pro owner -->
+  <script>
+    const user = JSON.parse(sessionStorage.getItem('huss_user'));
+    if (!user || user.role !== 'owner') {
+      document.getElementById('admin-toggle').style.display = 'none';
+      document.getElementById('admin-panel').remove();
+    }
+  </script>
+
   <script src="/client.js"></script>
 </body>
 </html>
