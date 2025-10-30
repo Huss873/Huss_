@@ -1,12 +1,5 @@
-/* client.js atualizado - Huss Video Chat
-   - grid UI melhorada
-   - identificação dos participantes
-   - fake cam (video/image) renderizando no canvas
-   - share screen preview (local) e envio da track para peers (substitui vídeo)
-   - botão "Ouvir Microfone" (monitor)
-*/
-
-const socket = io('/');
+// client.js
+const socket = io();
 const videoGrid = document.getElementById('video-grid');
 const screenPreview = document.getElementById('screen-preview');
 const screenPreviewVideo = document.getElementById('screen-preview-video');
@@ -22,8 +15,9 @@ if (!user) {
 
 const ROOM_ID = 'huss-private-room';
 let myStream = null;
-let peers = {};        // userId -> RTCPeerConnection
-let connectedUsers = {}; // userId -> true
+let peers = {}; // socketId -> RTCPeerConnection
+let connectedParticipants = {}; // socketId -> { email, role }
+
 let fakeCam = { active:false, stream:null, animationFrameId:null };
 let voiceSynth = { active:false };
 let monitor = { active:false, audioEl: null };
@@ -41,18 +35,17 @@ const adminPanel = document.getElementById('admin-panel');
 const userListEl = document.getElementById('user-list');
 const audioLevelBar = document.getElementById('audio-level');
 
-// helper to create tile id
-function tileIdFor(userId, kind='cam') {
-  return `tile-${kind}-${btoa(userId).replace(/=/g,'')}`;
+function tileIdFor(socketId) {
+  return `tile-${btoa(socketId).replace(/=/g,'')}`;
 }
 
-// get user media
 async function startLocalMedia() {
   try {
     const s = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
     myStream = s;
-    addOrUpdateLocalTile(user.email, s, true);
+    addOrUpdateLocalTile(s);
     monitorMicLevel(s);
+    // join the room (send email & role)
     socket.emit('join-room', ROOM_ID, user.email, user.role);
   } catch (err) {
     console.error('media failed', err);
@@ -61,187 +54,197 @@ async function startLocalMedia() {
 }
 startLocalMedia();
 
-/* ---------- Signaling handlers (dependem do seu server) ---------- */
-socket.on('current-users', (users) => {
-  connectedUsers = {};
-  users.forEach(u => connectedUsers[u] = true);
+/* signaling handlers */
+socket.on('connect', () => {
+  console.log('socket connected', socket.id);
+});
+
+socket.on('current-users', (participants) => {
+  // participants: [{ socketId, email, role }, ...] (includes us + others)
+  participants.forEach(p => {
+    connectedParticipants[p.socketId] = { email: p.email, role: p.role };
+  });
+
   updateAdminPanel();
-});
-
-socket.on('user-connected', (userId, role) => {
-  connectedUsers[userId] = true;
-  // conecta a nova pessoa (será quem cria oferta do nosso lado)
-  connectToNewUser(userId, myStream);
-  updateAdminPanel();
-});
-
-socket.on('user-disconnected', (userId) => {
-  if (peers[userId]) {
-    peers[userId].close();
-    delete peers[userId];
-  }
-  connectedUsers[userId] && delete connectedUsers[userId];
-  removeTile(userId);
-  updateAdminPanel();
-});
-
-// these events must be emitted by server to clients (offer/answer/ice)
-socket.on('offer', handleOffer);
-socket.on('answer', handleAnswer);
-socket.on('ice-candidate', handleIceCandidate);
-
-// admin commands
-socket.on('receive-admin-command', (data) => {
-  switch(data.command) {
-    case 'toggle-mute': toggleMute(); break;
-    case 'toggle-camera': toggleCamera(); break;
-    case 'remove-fake-cam':
-      if (fakeCam.active) stopFakeCam();
-      break;
-    case 'remove-voice-synth':
-      if (voiceSynth.active) toggleVoiceSynth();
-      break;
-  }
-});
-
-/* ---------- WebRTC core ---------- */
-function createPeerConnection(remoteUserId) {
-  const pc = new RTCPeerConnection({ iceServers:[{ urls:'stun:stun.l.google.com:19302' }] });
-
-  // add local tracks
-  if (myStream) myStream.getTracks().forEach(t => pc.addTrack(t, myStream));
-  if (fakeCam.active && fakeCam.stream) {
-    // if fake cam active we expect updateMediaStream to replace senders
-  }
-
-  pc.onicecandidate = (e) => {
-    if (e.candidate) {
-      socket.emit('ice-candidate', { caller: user.email, candidate: e.candidate });
+  // create peers to all other participants (except ourselves)
+  participants.forEach(p => {
+    if (p.socketId === socket.id) return;
+    if (!peers[p.socketId]) {
+      connectToNewUser(p.socketId);
     }
-  };
+  });
+});
 
-  pc.ontrack = (ev) => {
-    addOrUpdateRemoteTile(remoteUserId, ev.streams[0]);
-  };
+socket.on('user-connected', (info) => {
+  connectedParticipants[info.socketId] = { email: info.email, role: info.role };
+  updateAdminPanel();
+  // Wait briefly, then create an offer to the newcomer
+  setTimeout(() => {
+    if (!peers[info.socketId]) connectToNewUser(info.socketId);
+  }, 250);
+});
 
-  pc.onconnectionstatechange = () => {
-    if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
-      removeTile(remoteUserId);
-    }
-  };
+socket.on('user-disconnected', (info) => {
+  const sid = info.socketId;
+  if (peers[sid]) {
+    peers[sid].close();
+    delete peers[sid];
+  }
+  delete connectedParticipants[sid];
+  removeTile(sid);
+  updateAdminPanel();
+});
 
-  return pc;
-}
-
-function connectToNewUser(targetUserId, stream) {
-  // create pc and offer
-  if (peers[targetUserId]) return;
-  const pc = createPeerConnection(targetUserId);
-  peers[targetUserId] = pc;
-
-  pc.createOffer()
-    .then(offer => pc.setLocalDescription(offer))
-    .then(() => {
-      socket.emit('offer', { caller: user.email, sdp: pc.localDescription });
-    })
-    .catch(err => console.error('offer error', err));
-}
-
-async function handleOffer(payload) {
-  // payload.caller, payload.sdp
-  const caller = payload.caller;
-  if (!caller) return;
+socket.on('offer', async (payload) => {
+  // payload: { callerSocketId, callerEmail, sdp, target }
+  const caller = payload.callerSocketId;
+  if (!caller || caller === socket.id) return;
+  // create pc if not exists
   const pc = createPeerConnection(caller);
   peers[caller] = pc;
 
   await pc.setRemoteDescription(payload.sdp);
   const ans = await pc.createAnswer();
   await pc.setLocalDescription(ans);
-  socket.emit('answer', { caller: user.email, sdp: pc.localDescription });
-}
+  socket.emit('answer', { callerSocketId: socket.id, target: caller, sdp: pc.localDescription });
+});
 
-async function handleAnswer(payload) {
-  const pc = peers[payload.caller];
-  if (!pc) return;
-  await pc.setRemoteDescription(payload.sdp);
-}
+socket.on('answer', async (payload) => {
+  const caller = payload.callerSocketId; // the one who answered (their socket id)
+  const pc = peers[payload.callerSocketId] || peers[payload.target];
+  // we created an offer earlier; find the pc by payload.target (if any) or by the caller
+  const targetPc = peers[payload.target] || peers[payload.callerSocketId];
+  if (!targetPc) return;
+  await targetPc.setRemoteDescription(payload.sdp);
+});
 
-async function handleIceCandidate(payload) {
-  const pc = peers[payload.caller];
+socket.on('ice-candidate', async (payload) => {
+  const from = payload.callerSocketId;
+  const pc = peers[from];
   if (!pc) return;
   try {
     await pc.addIceCandidate(new RTCIceCandidate(payload.candidate));
   } catch (e) {
     console.warn('ICE add failed', e);
   }
+});
+
+// admin commands received
+socket.on('receive-admin-command', (data) => {
+  if (!data || !data.command) return;
+  switch (data.command) {
+    case 'toggle-mute': toggleMute(); break;
+    case 'toggle-camera': toggleCamera(); break;
+    case 'remove-fake-cam': if (fakeCam.active) stopFakeCam(); break;
+    case 'remove-voice-synth': if (voiceSynth.active) toggleVoiceSynth(); break;
+  }
+});
+
+/* WebRTC core */
+function createPeerConnection(remoteSocketId) {
+  const pc = new RTCPeerConnection({ iceServers:[{ urls:'stun:stun.l.google.com:19302' }] });
+
+  // add local tracks
+  if (myStream) myStream.getTracks().forEach(t => pc.addTrack(t, myStream));
+
+  pc.onicecandidate = (e) => {
+    if (e.candidate) {
+      socket.emit('ice-candidate', { callerSocketId: socket.id, target: remoteSocketId, candidate: e.candidate });
+    }
+  };
+
+  pc.ontrack = (ev) => {
+    addOrUpdateRemoteTile(remoteSocketId, ev.streams[0]);
+  };
+
+  pc.onconnectionstatechange = () => {
+    if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
+      removeTile(remoteSocketId);
+    }
+  };
+
+  return pc;
 }
 
-/* ---------- UI: Tiles & status ---------- */
+function connectToNewUser(targetSocketId) {
+  if (peers[targetSocketId]) return;
+  const pc = createPeerConnection(targetSocketId);
+  peers[targetSocketId] = pc;
 
-function addOrUpdateLocalTile(userId, stream, isLocal=false) {
-  addOrUpdateTile(userId, stream, { local:isLocal, label: 'Você' });
+  pc.createOffer()
+    .then(offer => pc.setLocalDescription(offer))
+    .then(() => {
+      socket.emit('offer', { callerSocketId: socket.id, callerEmail: user.email, target: targetSocketId, sdp: pc.localDescription });
+    })
+    .catch(err => console.error('offer error', err));
 }
 
-function addOrUpdateRemoteTile(userId, stream) {
-  addOrUpdateTile(userId, stream, { local:false, label: userId });
-}
-
-function addOrUpdateTile(userId, stream, opts={}) {
-  const id = tileIdFor(userId);
+/* UI - tiles */
+function addOrUpdateLocalTile(stream) {
+  const id = tileIdFor(socket.id);
   let container = document.getElementById(id);
   if (!container) {
     container = document.createElement('div');
     container.id = id;
     container.className = 'video-tile';
     container.innerHTML = `
-      <video autoplay playsinline></video>
-      <div class="tile-label">
-        <span class="name"></span>
-        <span class="mic-indicator status-dot"></span>
-      </div>
+      <video autoplay playsinline muted></video>
+      <div class="tile-label"><span class="name">Você (${user.email.split('@')[0]})</span><span class="mic-indicator status-dot"></span></div>
     `;
     videoGrid.prepend(container);
   }
   const videoEl = container.querySelector('video');
-  const nameEl = container.querySelector('.name');
   const micIndicator = container.querySelector('.mic-indicator');
 
-  nameEl.textContent = opts.label || userId;
+  videoEl.srcObject = stream;
+  videoEl.onloadedmetadata = () => videoEl.play().catch(()=>{});
+  micIndicator.classList.toggle('status-mic', stream.getAudioTracks().length > 0);
+}
+
+function addOrUpdateRemoteTile(socketId, stream) {
+  const id = tileIdFor(socketId);
+  let container = document.getElementById(id);
+  const name = (connectedParticipants[socketId] && connectedParticipants[socketId].email) ? connectedParticipants[socketId].email.split('@')[0] : socketId;
+  if (!container) {
+    container = document.createElement('div');
+    container.id = id;
+    container.className = 'video-tile';
+    container.innerHTML = `
+      <video autoplay playsinline></video>
+      <div class="tile-label"><span class="name">${name}</span><span class="mic-indicator status-dot"></span></div>
+    `;
+    videoGrid.prepend(container);
+  }
+  const videoEl = container.querySelector('video');
+  const micIndicator = container.querySelector('.mic-indicator');
 
   if (!stream) {
-    // show placeholder
     videoEl.style.display = 'none';
     if (!container.querySelector('.placeholder')) {
       const ph = document.createElement('div');
       ph.className = 'tile-placeholder placeholder';
-      ph.textContent = nameEl.textContent.split('@')[0] || 'User';
+      ph.textContent = name;
       container.appendChild(ph);
     }
     micIndicator.classList.toggle('status-mic', false);
     return;
   }
-
-  // remove placeholder if any
   const ph = container.querySelector('.placeholder');
   if (ph) ph.remove();
 
   videoEl.style.display = '';
   videoEl.srcObject = stream;
   videoEl.onloadedmetadata = () => videoEl.play().catch(()=>{});
-
-  // check if audio exists in stream (for indicator)
-  const hasAudio = stream.getAudioTracks().length > 0;
-  micIndicator.classList.toggle('status-mic', hasAudio);
+  micIndicator.classList.toggle('status-mic', stream.getAudioTracks().length > 0);
 }
 
-function removeTile(userId) {
-  const id = tileIdFor(userId);
+function removeTile(socketId) {
+  const id = tileIdFor(socketId);
   const el = document.getElementById(id);
   if (el) el.remove();
 }
 
-/* ---------- Controls behavior ---------- */
-
+/* Controls */
 function toggleMute() {
   if (!myStream) return;
   const t = myStream.getAudioTracks()[0];
@@ -267,7 +270,7 @@ disconnectBtn.addEventListener('click', () => {
   location.href = '/';
 });
 
-/* ---------- Fake Cam (image/video rendered to canvas) ---------- */
+/* Fake cam */
 fakeCamInput.addEventListener('change', startFakeCam);
 
 function startFakeCam() {
@@ -309,11 +312,8 @@ function startFakeCam() {
 function applyFakeCamStream(stream) {
   fakeCam.active = true;
   fakeCam.stream = stream;
-
-  // replace local preview (we'll update local tile)
-  addOrUpdateLocalTile(user.email, stream, true);
-
-  // replace video senders for peers
+  addOrUpdateLocalTile(stream);
+  // replace video senders
   for (const id in peers) {
     const pc = peers[id];
     const sender = pc.getSenders().find(s => s.track && s.track.kind === 'video');
@@ -326,11 +326,7 @@ function stopFakeCam() {
   if (fakeCam.animationFrameId) cancelAnimationFrame(fakeCam.animationFrameId);
   fakeCam.stream && fakeCam.stream.getTracks().forEach(t => t.stop());
   fakeCam.stream = null;
-
-  // restore local preview
-  addOrUpdateLocalTile(user.email, myStream, true);
-
-  // restore tracks
+  addOrUpdateLocalTile(myStream);
   for (const id in peers) {
     const pc = peers[id];
     const sender = pc.getSenders().find(s => s.track && s.track.kind === 'video');
@@ -338,22 +334,19 @@ function stopFakeCam() {
   }
 }
 
-/* ---------- Share screen (preview local, and replace outgoing video track) ---------- */
+/* Share screen */
 shareScreenBtn.addEventListener('click', async () => {
   if (!myStream) return;
   try {
     const screen = await navigator.mediaDevices.getDisplayMedia({ video: true });
-    // local preview
     screenPreview.hidden = false;
     screenPreviewVideo.srcObject = screen;
     screenPreviewVideo.play().catch(()=>{});
-    // replace outgoing video track on all peers
     const screenTrack = screen.getVideoTracks()[0];
     for (const id in peers) {
       const sender = peers[id].getSenders().find(s => s.track && s.track.kind === 'video');
       if (sender) sender.replaceTrack(screenTrack);
     }
-    // when ends, restore
     screenTrack.onended = () => {
       screenPreview.hidden = true;
       screenPreviewVideo.srcObject = null;
@@ -367,14 +360,13 @@ shareScreenBtn.addEventListener('click', async () => {
   }
 });
 
-/* ---------- Voice synthesizer toggle (simple example using filter) ---------- */
+/* Voice synth (simple) */
 voiceSynthBtn.addEventListener('click', toggleVoiceSynth);
 function toggleVoiceSynth() {
   voiceSynth.active = !voiceSynth.active;
   voiceSynthBtn.classList.toggle('active', voiceSynth.active);
   voiceSynthBtn.textContent = voiceSynth.active ? 'Voz Normal' : 'Ativar Voz Sintética';
 
-  // implement by creating processed audio track and replacing senders
   if (!myStream) return;
   if (voiceSynth.active) {
     const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -384,147 +376,77 @@ function toggleVoiceSynth() {
     const dest = audioCtx.createMediaStreamDestination();
     src.connect(bi); bi.connect(dest);
     const procTrack = dest.stream.getAudioTracks()[0];
-    // replace audio sender
     for (const id in peers) {
       const sender = peers[id].getSenders().find(s => s.track && s.track.kind === 'audio');
       if (sender) sender.replaceTrack(procTrack);
     }
-    // store for cleanup
-    voiceSynth._ctx = audioCtx;
-    voiceSynth._procTrack = procTrack;
   } else {
-    // restore original track
+    // restore original audio
     for (const id in peers) {
       const sender = peers[id].getSenders().find(s => s.track && s.track.kind === 'audio');
       if (sender) sender.replaceTrack(myStream.getAudioTracks()[0]);
     }
-    if (voiceSynth._procTrack) voiceSynth._procTrack.stop();
-    if (voiceSynth._ctx) voiceSynth._ctx.close();
-    voiceSynth._procTrack = null;
-    voiceSynth._ctx = null;
   }
 }
 
-/* ---------- Monitor (ouvir microfone) ---------- */
-monitorBtn.addEventListener('click', () => {
-  monitor.active = !monitor.active;
-  monitorBtn.classList.toggle('active', monitor.active);
-  monitorBtn.textContent = monitor.active ? 'Parar Ouvir' : 'Ouvir Microfone';
-  if (monitor.active) enableMonitor();
-  else disableMonitor();
-});
-
-function enableMonitor() {
-  if (!myStream) return;
-  if (monitor.audioEl) return;
-  const audio = document.createElement('audio');
-  audio.autoplay = true;
-  audio.muted = false;
-  // create stream with own audio track only
-  const out = new MediaStream([myStream.getAudioTracks()[0]]);
-  audio.srcObject = out;
-  document.body.appendChild(audio);
-  monitor.audioEl = audio;
-  // WARNING: isso pode causar eco se você tiver alto-falantes e microfone não isolados
-}
-
-function disableMonitor() {
-  if (!monitor.audioEl) return;
-  monitor.audioEl.srcObject = null;
-  monitor.audioEl.remove();
-  monitor.audioEl = null;
-}
-
-/* ---------- Audio meter ---------- */
+/* Audio meter (simple) */
 function monitorMicLevel(stream) {
   try {
     const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     const src = audioCtx.createMediaStreamSource(stream);
     const analyser = audioCtx.createAnalyser();
     analyser.fftSize = 256;
-    const data = new Uint8Array(analyser.frequencyBinCount);
     src.connect(analyser);
-    function frame() {
+    const data = new Uint8Array(analyser.frequencyBinCount);
+
+    function tick() {
       analyser.getByteFrequencyData(data);
-      const sum = data.reduce((a,b)=>a+b,0);
+      let sum = 0;
+      for (let i=0;i<data.length;i++) sum += data[i];
       const avg = sum / data.length;
-      const width = Math.min(200, Math.max(2, avg * 0.8));
-      audioLevelBar.style.width = width + 'px';
-      requestAnimationFrame(frame);
+      const pct = Math.min(100, Math.round(avg));
+      audioLevelBar.style.width = pct + '%';
+      requestAnimationFrame(tick);
     }
-    frame();
-  } catch(e) {
-    console.warn('audio meter failed', e);
-  }
+    tick();
+  } catch (e) { /* ignore */ }
 }
 
-/* ---------- Admin panel UI ---------- */
+/* Admin panel */
 adminToggle.addEventListener('click', () => {
-  if (user.role === 'owner') adminPanel.hidden = !adminPanel.hidden;
-  else alert('Você não é o dono.');
+  adminPanel.hidden = !adminPanel.hidden;
+  updateAdminPanel();
 });
 
 function updateAdminPanel() {
   userListEl.innerHTML = '';
-  Object.keys(connectedUsers).forEach(uid => {
-    if (uid === user.email) return;
+  const ordered = Object.entries(connectedParticipants);
+  ordered.forEach(([sid, info]) => {
     const div = document.createElement('div');
     div.className = 'user-controls';
     div.innerHTML = `
-      <div style="display:flex;justify-content:space-between;align-items:center;">
-        <div style="font-size:13px">${uid}</div>
-        <div style="display:flex;gap:6px">
-          <button class="btn" data-cmd="toggle-mute" data-target="${uid}">Mutar</button>
-          <button class="btn" data-cmd="toggle-camera" data-target="${uid}">Câmera</button>
-          <button class="btn" data-cmd="remove-fake-cam" data-target="${uid}">Remover Fake</button>
-          <button class="btn" data-cmd="remove-voice-synth" data-target="${uid}">Remover Voz</button>
-        </div>
+      <div><strong>${info.email.split('@')[0]}</strong> <small>(${info.role})</small></div>
+      <div>
+        <button class="btn" data-action="mute" data-target="${sid}">Mutar</button>
+        <button class="btn" data-action="camera" data-target="${sid}">Desligar Câmera</button>
+        <button class="btn" data-action="kick" data-target="${sid}">Remover FakeCam</button>
       </div>
     `;
     userListEl.appendChild(div);
   });
 
-  // attach click handlers
+  // attach handlers
   userListEl.querySelectorAll('button').forEach(b => {
     b.onclick = () => {
-      const cmd = b.dataset.cmd;
-      const tgt = b.dataset.target;
-      socket.emit('admin-command', { targetUserId: tgt, command: cmd });
+      const action = b.dataset.action;
+      const target = b.dataset.target;
+      if (!target) return;
+      // map to admin commands
+      let cmd = null;
+      if (action === 'mute') cmd = { command: 'toggle-mute', targetSocketId: target };
+      if (action === 'camera') cmd = { command: 'toggle-camera', targetSocketId: target };
+      if (action === 'kick') cmd = { command: 'remove-fake-cam', targetSocketId: target };
+      if (cmd) socket.emit('admin-command', cmd);
     };
   });
 }
-
-/* ---------- utils ---------- */
-function tileIdFor(userId) {
-  // safe id
-  return 'tile-' + btoa(userId).replace(/=/g,'');
-}
-
-/* note: when peer connections are present, updateMediaStream should be used to swap tracks for all peers */
-function updateMediaStream() {
-  // video: pick fakeCam.stream if active else local camera
-  const videoTrack = fakeCam.active && fakeCam.stream
-    ? fakeCam.stream.getVideoTracks()[0]
-    : myStream && myStream.getVideoTracks()[0];
-
-  const audioTrack = (voiceSynth.active && voiceSynth._procTrack)
-    ? voiceSynth._procTrack
-    : (myStream ? myStream.getAudioTracks()[0] : null);
-
-  for (const id in peers) {
-    const pc = peers[id];
-    const senders = pc.getSenders();
-    const sVideo = senders.find(s => s.track && s.track.kind === 'video');
-    const sAudio = senders.find(s => s.track && s.track.kind === 'audio');
-    if (sVideo && videoTrack) sVideo.replaceTrack(videoTrack);
-    if (sAudio && audioTrack) sAudio.replaceTrack(audioTrack);
-  }
-
-  // update our local preview
-  addOrUpdateLocalTile(user.email, fakeCam.active && fakeCam.stream ? fakeCam.stream : myStream, true);
-}
-
-/* ---------- finish ---------- */
-window.addEventListener('beforeunload', () => {
-  try { socket.disconnect(); } catch(e){}
-});
