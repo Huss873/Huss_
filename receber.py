@@ -2,26 +2,50 @@ from flask import Flask, request, jsonify
 import os
 import json
 import datetime
+import uuid
+import logging
 
 app = Flask(__name__)
 DATA_DIR = "./dados"
 
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+
 @app.route('/receber', methods=['POST'])
 def receber():
+    # Garante que o Content-Type é JSON e trata corpo inválido sem lançar exceção
+    data = request.get_json(silent=True)
+
+    if data is None:
+        return jsonify({"erro": "JSON ausente ou inválido. Envie Content-Type: application/json"}), 400
+
     try:
-        data = request.get_json()
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         os.makedirs(DATA_DIR, exist_ok=True)
-        filename = f"{DATA_DIR}/dados_{timestamp}.json"
-        with open(filename, 'w') as f:
-            json.dump(data, f, indent=2)
-        return {"status": "sucesso"}, 200
+
+        # timestamp + uuid curto evita sobrescrever arquivos em requisições simultâneas
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        unique_id = uuid.uuid4().hex[:8]
+        filename = os.path.join(DATA_DIR, f"dados_{timestamp}_{unique_id}.json")
+
+        with open(filename, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+
+        return jsonify({"status": "sucesso", "arquivo": filename}), 200
+
+    except OSError as e:
+        logger.exception("Erro de I/O ao salvar arquivo")
+        return jsonify({"erro": f"Falha ao salvar arquivo: {e}"}), 500
     except Exception as e:
-        return {"erro": str(e)}, 500
+        logger.exception("Erro inesperado")
+        return jsonify({"erro": "Erro interno no servidor"}), 500
+
 
 @app.route('/verificar', methods=['GET'])
 def verificar():
-    return {"status": "online"}, 200
+    return jsonify({"status": "online"}), 200
+
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
+    # debug=False é importante em produção (evita exposição de código/erros)
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)), debug=False)
