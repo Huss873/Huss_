@@ -39,7 +39,7 @@ def receber():
 
 @app.route('/verificar', methods=['GET'])
 def verificar():
-    return jsonify({"status": "online "timestamp": datetime.datetime.now().isoformat()}), 200
+    return jsonify({"status": "online", "timestamp": datetime.datetime.now().isoformat()}), 200
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)), debugFalse)
